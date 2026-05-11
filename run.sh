@@ -304,8 +304,10 @@ ARGS=(
 )
 
 if [ "$MODE" = "gpu" ]; then
+    ARGS+=(--gpu-batch "${GPU_BATCH:-64}")
     echo "Starting Equium Miner (GPU)..."
     echo "  RPC: $RPC_URL"
+    echo "  GPU Batch: ${GPU_BATCH:-64} nonces/launch (~$(( ${GPU_BATCH:-64} * 37 ))MB VRAM)"
 else
     ARGS+=(--threads "$THREADS")
     echo "Starting Equium Miner (CPU)..."
