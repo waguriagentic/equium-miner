@@ -107,7 +107,7 @@ const RULE: &str = "   ───────────────────
 /// and CLI flags.
 enum SolverMode {
     Cpu { threads: usize },
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     Gpu { batch_size: usize },
 }
 
@@ -125,7 +125,7 @@ fn main() -> Result<()> {
 
     // Determine solver mode.
     let solver_mode = {
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         {
             SolverMode::Gpu {
                 batch_size: args.gpu_batch,
@@ -187,7 +187,7 @@ fn main() -> Result<()> {
     let mut last_advance_attempt_at: Option<Instant> = None;
 
     // Initialize GPU solver once (reused across rounds).
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     let mut gpu_solver = match &solver_mode {
         SolverMode::Gpu { batch_size } => {
             match equihash_gpu::GpuSolver::new(96, 5, *batch_size) {
@@ -297,7 +297,7 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "gpu")]
             SolverMode::Gpu { batch_size } => {
                 if let Some(ref mut solver) = gpu_solver {
                     match race_for_solution_gpu(
@@ -426,7 +426,7 @@ fn print_boot(miner: &Pubkey, program: &Pubkey, network: &str, mode: &SolverMode
     println!("{}{}{}", C_ROSE_B, LOGO, C_RESET);
     let mode_label = match mode {
         SolverMode::Cpu { .. } => "cpu-mineable on solana",
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         SolverMode::Gpu { .. } => "gpu-mineable on solana",
     };
     println!(
@@ -442,7 +442,7 @@ fn print_boot(miner: &Pubkey, program: &Pubkey, network: &str, mode: &SolverMode
         SolverMode::Cpu { threads } => {
             println!("   {}mode{}      {}CPU ({} threads){}", C_DIM, C_RESET, C_TEAL, threads, C_RESET);
         }
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "gpu")]
         SolverMode::Gpu { batch_size } => {
             println!("   {}mode{}      {}GPU (batch {}){}", C_DIM, C_RESET, C_TEAL, batch_size, C_RESET);
         }
@@ -633,7 +633,7 @@ fn race_for_solution_cpu(
 /// GPU solver: generate nonce batches and feed them to the GPU kernel.
 /// Returns the first below-target solution found, or None after exhausting
 /// the nonce budget.
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 fn race_for_solution_gpu(
     solver: &mut equihash_gpu::GpuSolver,
     current_challenge: &[u8; 32],
