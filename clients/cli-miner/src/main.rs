@@ -131,7 +131,7 @@ fn main() -> Result<()> {
                 batch_size: args.gpu_batch,
             }
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "gpu"))]
         {
             let tc = if args.threads == 0 {
                 num_cpus::get().max(1)
