@@ -79,6 +79,28 @@ install_prerequisites() {
         echo "[ok] Rust $(rustc --version | awk '{print $2}')"
     fi
 
+    # Detect and export CUDA path if GPU mode
+    if [ "${MODE:-cpu}" = "gpu" ]; then
+        if command -v nvcc &>/dev/null; then
+            echo "[ok] nvcc: $(nvcc --version | grep release | awk '{print $6}')"
+        else
+            # Try common CUDA install locations
+            for cuda_dir in /usr/local/cuda*/bin /opt/cuda*/bin; do
+                if [ -x "$cuda_dir/nvcc" ]; then
+                    export PATH="$cuda_dir:$PATH"
+                    export CUDA_PATH="$(dirname "$cuda_dir")"
+                    echo "[ok] nvcc found at $cuda_dir (added to PATH)"
+                    break
+                fi
+            done
+            if ! command -v nvcc &>/dev/null; then
+                echo "[!] nvcc not found — install CUDA toolkit for GPU mining"
+                echo "    apt-get install -y cuda-nvcc-12-4"
+                exit 1
+            fi
+        fi
+    fi
+
     # Check Python modules (pynacl, base58)
     local PIP_PKGS=()
     if ! python3 -c "import nacl" &>/dev/null; then
@@ -210,10 +232,8 @@ ARGS=(
 )
 
 if [ "$MODE" = "gpu" ]; then
-    ARGS+=(--gpu-batch "${GPU_BATCH:-16}")
     echo "Starting Equium Miner (GPU)..."
     echo "  RPC: $RPC_URL"
-    echo "  GPU Batch: ${GPU_BATCH:-16} nonces/launch (~$(( ${GPU_BATCH:-16} * 37 ))MB VRAM)"
 else
     ARGS+=(--threads "$THREADS")
     echo "Starting Equium Miner (CPU)..."
