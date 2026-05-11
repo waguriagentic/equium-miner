@@ -15,6 +15,14 @@ install_prerequisites() {
     echo "=== Checking prerequisites ==="
     local MISSING=()
 
+    # Check curl (needed for rustup install)
+    if ! command -v curl &>/dev/null; then
+        echo "[!] curl not found"
+        MISSING+=("curl")
+    else
+        echo "[ok] curl"
+    fi
+
     # Check Rust toolchain
     if ! command -v cargo &>/dev/null; then
         echo "[!] Rust toolchain not found"
@@ -42,7 +50,7 @@ install_prerequisites() {
     local SYS_PKGS=()
     for pkg in "${MISSING[@]}"; do
         case "$pkg" in
-            python3|python3-dev) SYS_PKGS+=("$pkg") ;;
+            python3|python3-dev|curl) SYS_PKGS+=("$pkg") ;;
         esac
     done
 
