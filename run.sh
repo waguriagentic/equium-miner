@@ -46,11 +46,18 @@ install_prerequisites() {
         echo "[ok] python3-dev"
     fi
 
+    # Check build-essential (C compiler needed for Rust builds)
+    if ! dpkg -s build-essential &>/dev/null 2>&1; then
+        MISSING+=("build-essential")
+    else
+        echo "[ok] build-essential"
+    fi
+
     # Install system packages if missing
     local SYS_PKGS=()
     for pkg in "${MISSING[@]}"; do
         case "$pkg" in
-            python3|python3-dev|curl) SYS_PKGS+=("$pkg") ;;
+            python3|python3-dev|curl|build-essential) SYS_PKGS+=("$pkg") ;;
         esac
     done
 
