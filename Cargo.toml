@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "programs/equium",
     "crates/equihash-core",
+    "crates/equihash-gpu",
     "clients/cli-miner",
 ]
 

@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+#![allow(deprecated)]
 //! Equium ($EQM) — on-chain CPU mining program.
 //!
 //! See `/home/ubuntu/.claude/plans/i-want-to-develop-kind-rossum.md` for the

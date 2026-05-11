@@ -1,0 +1,24 @@
+[package]
+name = "equihash-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CUDA Equihash solver for Equium (optional, off by default)"
+build = "build.rs"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# Off by default: building requires CUDA toolkit (nvcc). When enabled,
+# `build.rs` compiles `src/kernel.cu` into a static library and links
+# against `cudart`.
+default = []
+cuda = []
+
+[dependencies]
+equihash-core = { path = "../equihash-core", features = ["solver"] }
+equihash = { workspace = true }
+
+[build-dependencies]
+cc = "1"

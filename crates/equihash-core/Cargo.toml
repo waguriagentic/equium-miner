@@ -40,3 +40,7 @@ required-features = ["solver"]
 [[example]]
 name = "solve_block"
 required-features = ["solver"]
+
+[[example]]
+name = "bench_solver"
+required-features = ["solver"]

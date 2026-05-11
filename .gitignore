@@ -53,3 +53,6 @@ clients/web-miner/app/.env.development.local
 clients/web-miner/app/.env.production.local
 .agents/
 skills-lock.json
+
+# Local config
+.env

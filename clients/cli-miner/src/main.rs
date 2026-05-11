@@ -9,6 +9,8 @@
 //!                --keypair ~/.config/solana/id.json \
 //!                --max-blocks 100
 
+
+#![allow(deprecated)]
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,12 +22,11 @@ use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use anchor_spl::associated_token::get_associated_token_address_with_program_id;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use crossbeam_channel::{bounded, RecvTimeoutError};
+use crossbeam_channel::bounded;
 use equihash_core::challenge::{build_input, solution_hash};
 use equihash_core::solver::{try_nonce, BaseState};
 use equihash_core::target::hash_under_target;
 use equium::state::{EquiumConfig, CONFIG_SEED, VAULT_SEED};
-use rand::RngCore;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
@@ -79,7 +80,6 @@ struct Args {
 const C_RESET: &str = "\x1b[0m";
 const C_DIM: &str = "\x1b[2m";
 const C_BOLD: &str = "\x1b[1m";
-const C_ROSE: &str = "\x1b[35m"; // brand
 const C_ROSE_B: &str = "\x1b[1;35m";
 const C_GOLD: &str = "\x1b[33m";
 const C_GOLD_B: &str = "\x1b[1;33m";
@@ -465,15 +465,20 @@ fn race_for_solution(
             use rand::Rng;
             let mut rng = rand::thread_rng();
             let mut tried: u64 = 0;
+            let mut since_report: u64 = 0;
             while tried < max && !stop.load(Ordering::Relaxed) {
                 let mut nonce = [0u8; 32];
                 rng.fill(&mut nonce);
                 tried += 1;
+                since_report += 1;
+                if since_report >= 64 {
+                    total.fetch_add(since_report, Ordering::Relaxed);
+                    since_report = 0;
+                }
                 if let Some(soln) = try_nonce(&base, &input, &nonce) {
                     let h = solution_hash(&soln, &input);
                     if hash_under_target(&h, &target) {
-                        // Best-effort send; if the channel is closed the
-                        // race is already over.
+                        total.fetch_add(since_report, Ordering::Relaxed);
                         let _ = tx.send(RaceWinner {
                             nonce,
                             soln_indices: soln,
@@ -483,14 +488,36 @@ fn race_for_solution(
                     }
                 }
             }
-            total.fetch_add(tried, Ordering::Relaxed);
+            total.fetch_add(since_report, Ordering::Relaxed);
         }));
     }
     drop(tx);
 
+    // Progress reporter thread — prints hashrate every 5 seconds
+    let progress_stop = stop.clone();
+    let progress_total = total_nonces.clone();
+    let progress_handle = std::thread::spawn(move || {
+        let start = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if progress_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let tried = progress_total.load(Ordering::Relaxed);
+            let elapsed = start.elapsed().as_secs_f64().max(0.001);
+            let hr = tried as f64 / elapsed;
+            println!(
+                "     {}· mining{}   {}nonces {}{}   {}{}{}",
+                C_DIM, C_RESET, C_DIM, tried, C_RESET,
+                C_GOLD, fmt_hashrate(hr), C_RESET,
+            );
+        }
+    });
+
     // Wait for either a winner or all threads to exhaust their budget.
     let winner = rx.recv_timeout(Duration::from_secs(600)).ok();
     stop.store(true, Ordering::Relaxed);
+    let _ = progress_handle.join();
     for h in handles {
         let _ = h.join();
     }

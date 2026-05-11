@@ -1523,6 +1523,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "equihash-gpu"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "equihash",
+ "equihash-core",
+]
+
+[[package]]
 name = "equium"
 version = "0.1.0"
 dependencies = [
@@ -1544,6 +1553,7 @@ dependencies = [
  "crossbeam-channel",
  "env_logger 0.11.10",
  "equihash-core",
+ "equihash-gpu",
  "equium",
  "hex",
  "log",
@@ -1553,14 +1563,6 @@ dependencies = [
  "solana-program",
  "solana-sdk",
  "tokio",
-]
-
-[[package]]
-name = "equium-wasm"
-version = "0.1.0"
-dependencies = [
- "equihash-core",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -6936,14 +6938,6 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
-
-[[package]]
-name = "verify-bench"
-version = "0.1.0"
-dependencies = [
- "anchor-lang",
- "equihash-core",
-]
 
 [[package]]
 name = "version_check"
