@@ -49,8 +49,10 @@ install_prerequisites() {
     if [ ${#SYS_PKGS[@]} -gt 0 ]; then
         echo ""
         echo "Installing system packages: ${SYS_PKGS[*]}"
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq "${SYS_PKGS[@]}"
+        local SUDO="sudo"
+        [ "$(id -u)" -eq 0 ] && SUDO=""
+        $SUDO apt-get update -qq
+        $SUDO apt-get install -y -qq "${SYS_PKGS[@]}"
     fi
 
     # Install Rust via rustup if missing
