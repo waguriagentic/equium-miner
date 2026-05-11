@@ -38,7 +38,7 @@ use solana_sdk::sysvar;
 use solana_sdk::transaction::Transaction;
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Equium reference CPU miner")]
+#[command(version, about = "Equium CPU/GPU miner")]
 struct Args {
     /// RPC endpoint URL. Defaults to the public mainnet endpoint, which
     /// rate-limits aggressively under sustained load — use a Helius / Triton
@@ -72,6 +72,11 @@ struct Args {
     /// wins the round.
     #[arg(long, short = 't', default_value_t = 0)]
     threads: usize,
+
+    /// GPU batch size — number of nonces per kernel launch (~37 MB VRAM each).
+    /// Only used when built with `--features gpu`.
+    #[arg(long, short = 'b', default_value_t = 64)]
+    gpu_batch: usize,
 }
 
 // ANSI styling shortcuts. Colors are picked to look good against either a
@@ -98,6 +103,14 @@ const LOGO: &str = r#"
 
 const RULE: &str = "   ────────────────────────────────────────────────────";
 
+/// Runtime solver mode — detected at startup based on compile features
+/// and CLI flags.
+enum SolverMode {
+    Cpu { threads: usize },
+    #[cfg(feature = "cuda")]
+    Gpu { batch_size: usize },
+}
+
 fn main() -> Result<()> {
     // Initialize a quiet env_logger only for crate-internal modules; the
     // miner itself uses println! for fully-controlled formatting.
@@ -109,6 +122,25 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // Determine solver mode.
+    let solver_mode = {
+        #[cfg(feature = "cuda")]
+        {
+            SolverMode::Gpu {
+                batch_size: args.gpu_batch,
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let tc = if args.threads == 0 {
+                num_cpus::get().max(1)
+            } else {
+                args.threads
+            };
+            SolverMode::Cpu { threads: tc }
+        }
+    };
 
     let program_id: Pubkey = match &args.program_id {
         Some(s) => Pubkey::from_str(s).context("invalid --program-id")?,
@@ -125,7 +157,7 @@ fn main() -> Result<()> {
 
     let network_label = network_label_from_url(&args.rpc_url);
 
-    print_boot(&miner, &program_id, network_label);
+    print_boot(&miner, &program_id, network_label, &solver_mode);
 
     let mut blocks_mined = 0u64;
     let started_at = Instant::now();
@@ -153,6 +185,32 @@ fn main() -> Result<()> {
     const ADVANCE_COOLDOWN_SECS: u64 = 30;
     let mut last_height_change_at = Instant::now();
     let mut last_advance_attempt_at: Option<Instant> = None;
+
+    // Initialize GPU solver once (reused across rounds).
+    #[cfg(feature = "cuda")]
+    let mut gpu_solver = match &solver_mode {
+        SolverMode::Gpu { batch_size } => {
+            match equihash_gpu::GpuSolver::new(96, 5, *batch_size) {
+                Ok(s) => {
+                    println!(
+                        "   {}gpu solver initialized{}   {}batch {} nonces (~{} MB VRAM){}",
+                        C_SAGE, C_RESET, C_DIM, batch_size, batch_size * 37, C_RESET,
+                    );
+                    println!("{}{}{}", C_GRAY, RULE, C_RESET);
+                    Some(s)
+                }
+                Err(e) => {
+                    println!(
+                        "   {}gpu init failed:{} {}   {}falling back to CPU{}",
+                        C_GOLD, C_RESET, e, C_DIM, C_RESET,
+                    );
+                    println!("{}{}{}", C_GRAY, RULE, C_RESET);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
 
     loop {
         let cfg = fetch_config(&rpc, &config_pda)
@@ -211,41 +269,73 @@ fn main() -> Result<()> {
         }
 
         let solve_started = Instant::now();
-        let input = build_input(
-            &cfg.current_challenge,
-            &miner.to_bytes(),
-            cfg.block_height,
-        );
-        let thread_count = if args.threads == 0 {
-            num_cpus::get().max(1)
-        } else {
-            args.threads
+
+        let solution = match &solver_mode {
+            SolverMode::Cpu { threads } => {
+                let input = build_input(
+                    &cfg.current_challenge,
+                    &miner.to_bytes(),
+                    cfg.block_height,
+                );
+                match race_for_solution_cpu(
+                    cfg.equihash_n,
+                    cfg.equihash_k,
+                    &input,
+                    &cfg.current_target,
+                    *threads,
+                    args.max_nonces_per_round,
+                ) {
+                    Some((sol, nonces_tried)) => {
+                        total_nonces = total_nonces.saturating_add(nonces_tried);
+                        Some(sol)
+                    }
+                    None => {
+                        total_nonces = total_nonces.saturating_add(
+                            args.max_nonces_per_round * *threads as u64,
+                        );
+                        None
+                    }
+                }
+            }
+            #[cfg(feature = "cuda")]
+            SolverMode::Gpu { batch_size } => {
+                if let Some(ref mut solver) = gpu_solver {
+                    match race_for_solution_gpu(
+                        solver,
+                        &cfg.current_challenge,
+                        &miner.to_bytes(),
+                        cfg.block_height,
+                        &cfg.current_target,
+                        *batch_size,
+                        args.max_nonces_per_round,
+                    ) {
+                        Some((sol, nonces_tried)) => {
+                            total_nonces = total_nonces.saturating_add(nonces_tried);
+                            Some(sol)
+                        }
+                        None => {
+                            total_nonces = total_nonces
+                                .saturating_add(args.max_nonces_per_round);
+                            None
+                        }
+                    }
+                } else {
+                    // GPU init failed — this shouldn't happen since we fall back,
+                    // but just in case.
+                    None
+                }
+            }
         };
 
-        // Race N worker threads against the same target. First below-target
-        // solution wins the round; others abort via the shared stop flag.
-        let solution = match race_for_solution(
-            cfg.equihash_n,
-            cfg.equihash_k,
-            &input,
-            &cfg.current_target,
-            thread_count,
-            args.max_nonces_per_round,
-        ) {
-            Some((sol, nonces_tried)) => {
-                total_nonces = total_nonces.saturating_add(nonces_tried);
-                sol
-            }
+        let solve_ms = solve_started.elapsed().as_millis() as u64;
+        try_in_round += 1;
+
+        let session_secs = started_at.elapsed().as_secs_f64().max(0.001);
+        let hashrate = total_nonces as f64 / session_secs;
+
+        let solution = match solution {
+            Some(s) => s,
             None => {
-                // No below-target nonce in this budget. Bump the counter,
-                // refetch config, try again.
-                total_nonces = total_nonces.saturating_add(
-                    args.max_nonces_per_round * thread_count as u64,
-                );
-                try_in_round += 1;
-                let solve_ms = solve_started.elapsed().as_millis() as u64;
-                let session_secs = started_at.elapsed().as_secs_f64().max(0.001);
-                let hashrate = total_nonces as f64 / session_secs;
                 println!(
                     "     {}· try #{}{}   {}exhausted{}        {}{}ms{}   {}{}{}",
                     C_GRAY, try_in_round, C_RESET,
@@ -256,13 +346,13 @@ fn main() -> Result<()> {
                 continue;
             }
         };
-        let solve_ms = solve_started.elapsed().as_millis() as u64;
-        try_in_round += 1;
-
-        let session_secs = started_at.elapsed().as_secs_f64().max(0.001);
-        let hashrate = total_nonces as f64 / session_secs;
 
         // Sanity: re-verify off-chain that the winning solution is under target.
+        let input = build_input(
+            &cfg.current_challenge,
+            &miner.to_bytes(),
+            cfg.block_height,
+        );
         let cand_hash = solution_hash(&solution.soln_indices, &input);
         debug_assert!(hash_under_target(&cand_hash, &cfg.current_target));
         let _ = cand_hash;
@@ -332,17 +422,31 @@ fn main() -> Result<()> {
     }
 }
 
-fn print_boot(miner: &Pubkey, program: &Pubkey, network: &str) {
+fn print_boot(miner: &Pubkey, program: &Pubkey, network: &str, mode: &SolverMode) {
     println!("{}{}{}", C_ROSE_B, LOGO, C_RESET);
+    let mode_label = match mode {
+        SolverMode::Cpu { .. } => "cpu-mineable on solana",
+        #[cfg(feature = "cuda")]
+        SolverMode::Gpu { .. } => "gpu-mineable on solana",
+    };
     println!(
-        "   {}cpu-mineable on solana{}                            {}$EQM ⛏{}",
-        C_DIM, C_RESET, C_GOLD_B, C_RESET
+        "   {}{}{}                            {}$EQM ⛏{}",
+        C_DIM, mode_label, C_RESET, C_GOLD_B, C_RESET
     );
     println!();
     println!("{}{}{}", C_GRAY, RULE, C_RESET);
     println!("   {}miner{}     {}{}{}", C_DIM, C_RESET, C_TEAL, short_pk(miner), C_RESET);
     println!("   {}program{}   {}{}{}", C_DIM, C_RESET, C_TEAL, short_pk(program), C_RESET);
     println!("   {}network{}   {}{}{}", C_DIM, C_RESET, C_TEAL, network, C_RESET);
+    match mode {
+        SolverMode::Cpu { threads } => {
+            println!("   {}mode{}      {}CPU ({} threads){}", C_DIM, C_RESET, C_TEAL, threads, C_RESET);
+        }
+        #[cfg(feature = "cuda")]
+        SolverMode::Gpu { batch_size } => {
+            println!("   {}mode{}      {}GPU (batch {}){}", C_DIM, C_RESET, C_TEAL, batch_size, C_RESET);
+        }
+    }
     println!("{}{}{}", C_GRAY, RULE, C_RESET);
 }
 
@@ -361,7 +465,9 @@ fn network_label_from_url(url: &str) -> &'static str {
 }
 
 fn fmt_hashrate(hashes_per_sec: f64) -> String {
-    if hashes_per_sec >= 1000.0 {
+    if hashes_per_sec >= 1_000_000.0 {
+        format!("{:.2} MH/s", hashes_per_sec / 1_000_000.0)
+    } else if hashes_per_sec >= 1000.0 {
         format!("{:.1} kH/s", hashes_per_sec / 1000.0)
     } else {
         format!("{:.1} H/s", hashes_per_sec)
@@ -434,12 +540,10 @@ struct RaceWinner {
     soln_indices: Vec<u8>,
 }
 
-/// Spawn `threads` solver workers and race them to find a nonce whose
+/// CPU solver: spawn `threads` workers and race them to find a nonce whose
 /// Equihash solution falls under `target`. Each worker grinds up to
-/// `max_per_thread` nonces before giving up. Returns the winning solution
-/// plus the total number of nonces actually tried (across all threads)
-/// so the caller can update its hashrate counter.
-fn race_for_solution(
+/// `max_per_thread` nonces before giving up.
+fn race_for_solution_cpu(
     n: u32,
     k: u32,
     input: &[u8; equihash_core::challenge::I_LEN],
@@ -524,6 +628,95 @@ fn race_for_solution(
 
     let nonces_tried = total_nonces.load(Ordering::Relaxed);
     winner.map(|w| (w, nonces_tried))
+}
+
+/// GPU solver: generate nonce batches and feed them to the GPU kernel.
+/// Returns the first below-target solution found, or None after exhausting
+/// the nonce budget.
+#[cfg(feature = "cuda")]
+fn race_for_solution_gpu(
+    solver: &mut equihash_gpu::GpuSolver,
+    current_challenge: &[u8; 32],
+    miner_pubkey: &[u8; 32],
+    block_height: u64,
+    target: &[u8; 32],
+    batch_size: usize,
+    max_nonces: u64,
+) -> Option<(RaceWinner, u64)> {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut total_tried: u64 = 0;
+    let progress_stop = Arc::new(AtomicBool::new(false));
+    let progress_total = Arc::new(AtomicU64::new(0));
+
+    // Progress reporter
+    let ps = progress_stop.clone();
+    let pt = progress_total.clone();
+    let progress_handle = std::thread::spawn(move || {
+        let start = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if ps.load(Ordering::Relaxed) {
+                break;
+            }
+            let tried = pt.load(Ordering::Relaxed);
+            let elapsed = start.elapsed().as_secs_f64().max(0.001);
+            let hr = tried as f64 / elapsed;
+            println!(
+                "     {}· mining (GPU){}   {}nonces {}{}   {}{}{}",
+                C_DIM, C_RESET, C_DIM, tried, C_RESET,
+                C_GOLD, fmt_hashrate(hr), C_RESET,
+            );
+        }
+    });
+
+    let result = loop {
+        if total_tried >= max_nonces {
+            break None;
+        }
+
+        // Generate a batch of random nonces.
+        let remaining = max_nonces - total_tried;
+        let this_batch = batch_size.min(remaining as usize);
+        let mut nonces: Vec<[u8; 32]> = Vec::with_capacity(this_batch);
+        for _ in 0..this_batch {
+            let mut nonce = [0u8; 32];
+            rng.fill(&mut nonce);
+            nonces.push(nonce);
+        }
+
+        // Run GPU kernel.
+        let candidates = match solver.try_batch(current_challenge, miner_pubkey, block_height, &nonces) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("     {}gpu error:{} {}", C_GOLD, C_RESET, e);
+                break None;
+            }
+        };
+
+        total_tried += this_batch as u64;
+        progress_total.store(total_tried, Ordering::Relaxed);
+
+        // Check each candidate against the target.
+        for cand in candidates {
+            let h = solution_hash(&cand.soln_indices, &build_input(current_challenge, miner_pubkey, block_height));
+            if hash_under_target(&h, target) {
+                progress_stop.store(true, Ordering::Relaxed);
+                let _ = progress_handle.join();
+                return Some((
+                    RaceWinner {
+                        nonce: cand.nonce,
+                        soln_indices: cand.soln_indices,
+                    },
+                    total_tried,
+                ));
+            }
+        }
+    };
+
+    progress_stop.store(true, Ordering::Relaxed);
+    let _ = progress_handle.join();
+    result
 }
 
 #[allow(clippy::too_many_arguments)]

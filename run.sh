@@ -81,22 +81,94 @@ install_prerequisites() {
 
     # Detect and export CUDA path if GPU mode
     if [ "${MODE:-cpu}" = "gpu" ]; then
+        local CUDA_FOUND=0
+
+        # Check if nvcc is already on PATH
         if command -v nvcc &>/dev/null; then
-            echo "[ok] nvcc: $(nvcc --version | grep release | awk '{print $6}')"
-        else
-            # Try common CUDA install locations
+            local NVCC_VER
+            NVCC_VER=$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+' || echo "unknown")
+            echo "[ok] nvcc $NVCC_VER (on PATH)"
+            CUDA_FOUND=1
+        fi
+
+        # Try common CUDA install locations
+        if [ "$CUDA_FOUND" -eq 0 ]; then
             for cuda_dir in /usr/local/cuda*/bin /opt/cuda*/bin; do
                 if [ -x "$cuda_dir/nvcc" ]; then
                     export PATH="$cuda_dir:$PATH"
                     export CUDA_PATH="$(dirname "$cuda_dir")"
-                    echo "[ok] nvcc found at $cuda_dir (added to PATH)"
+                    local NVCC_VER
+                    NVCC_VER=$("$cuda_dir/nvcc" --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+' || echo "unknown")
+                    echo "[ok] nvcc $NVCC_VER found at $cuda_dir (added to PATH)"
+                    CUDA_FOUND=1
                     break
                 fi
             done
-            if ! command -v nvcc &>/dev/null; then
-                echo "[!] nvcc not found — install CUDA toolkit for GPU mining"
-                echo "    apt-get install -y cuda-nvcc-12-4"
+        fi
+
+        # Auto-install CUDA toolkit if nvcc still not found
+        if [ "$CUDA_FOUND" -eq 0 ]; then
+            echo "[!] nvcc not found — installing CUDA toolkit..."
+            # Detect driver-supported CUDA version from nvidia-smi
+            local DRIVER_CUDA_VER=""
+            if command -v nvidia-smi &>/dev/null; then
+                DRIVER_CUDA_VER=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' || echo "")
+            fi
+            if [ -z "$DRIVER_CUDA_VER" ]; then
+                # Fallback: check /proc/driver/nvidia/version
+                DRIVER_CUDA_VER=$(grep -oP 'CUDA \K[0-9]+\.[0-9]+' /proc/driver/nvidia/version 2>/dev/null || echo "")
+            fi
+
+            if [ -n "$DRIVER_CUDA_VER" ]; then
+                # Use major.minor for package name (e.g. 12.4 → cuda-nvcc-12-4)
+                local CUDA_MAJOR CUDA_MINOR CUDA_PKG_VER
+                CUDA_MAJOR=$(echo "$DRIVER_CUDA_VER" | cut -d. -f1)
+                CUDA_MINOR=$(echo "$DRIVER_CUDA_VER" | cut -d. -f2)
+                CUDA_PKG_VER="${CUDA_MAJOR}-${CUDA_MINOR}"
+                echo "   Driver supports CUDA $DRIVER_CUDA_VER — installing cuda-nvcc-${CUDA_PKG_VER}"
+                $SUDO apt-get install -y -qq "cuda-nvcc-${CUDA_PKG_VER}" "cuda-cudart-dev-${CUDA_PKG_VER}" 2>/dev/null \
+                    || $SUDO apt-get install -y -qq "cuda-nvcc-${CUDA_PKG_VER}" 2>/dev/null \
+                    || { echo "[!] Failed to install cuda-nvcc-${CUDA_PKG_VER}"; exit 1; }
+
+                # Find and export the newly installed CUDA path
+                for cuda_dir in /usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR}/bin /usr/local/cuda-${CUDA_MAJOR}/bin; do
+                    if [ -x "$cuda_dir/nvcc" ]; then
+                        export PATH="$cuda_dir:$PATH"
+                        export CUDA_PATH="$(dirname "$cuda_dir")"
+                        echo "[ok] nvcc installed at $cuda_dir"
+                        CUDA_FOUND=1
+                        break
+                    fi
+                done
+            else
+                echo "[!] Cannot detect CUDA version from driver"
+                echo "    Install manually: apt-get install -y cuda-nvcc-<MAJOR>-<MINOR>"
+                echo "    Then set: export PATH=/usr/local/cuda/bin:\$PATH"
                 exit 1
+            fi
+        fi
+
+        if [ "$CUDA_FOUND" -eq 0 ]; then
+            echo "[!] CUDA toolkit installation failed"
+            exit 1
+        fi
+
+        # Auto-detect GPU architecture for EQUIUM_CUDA_ARCH
+        if [ -z "${EQUIUM_CUDA_ARCH:-}" ] && command -v nvidia-smi &>/dev/null; then
+            local GPU_NAME
+            GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+            if [ -n "$GPU_NAME" ]; then
+                # Map GPU name to CUDA compute capability
+                case "$GPU_NAME" in
+                    *"1030"*|*"1050"*|*"1060"*|*"1070"*|*"1080"*) export EQUIUM_CUDA_ARCH="sm_61" ;;
+                    *"1660"*|*"1650"*|*"T600"*|*"T400"*) export EQUIUM_CUDA_ARCH="sm_75" ;;
+                    *"2060"*|*"2070"*|*"2080"*|*"T4"*) export EQUIUM_CUDA_ARCH="sm_75" ;;
+                    *"3050"*|*"3060"*|*"3070"*|*"3080"*|*"3090"*|*"A40"*|*"A100"*) export EQUIUM_CUDA_ARCH="sm_86" ;;
+                    *"4050"*|*"4060"*|*"4070"*|*"4080"*|*"4090"*) export EQUIUM_CUDA_ARCH="sm_89" ;;
+                    *"5090"*|*"5080"*|*"5070"*|*"5060"*) export EQUIUM_CUDA_ARCH="sm_100" ;;
+                    *) export EQUIUM_CUDA_ARCH="sm_75" ;; # safe default
+                esac
+                echo "[ok] GPU: $GPU_NAME → arch $EQUIUM_CUDA_ARCH"
             fi
         fi
     fi
