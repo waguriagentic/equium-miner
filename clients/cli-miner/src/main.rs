@@ -124,7 +124,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Determine solver mode.
-    let solver_mode = {
+    let mut solver_mode = {
         #[cfg(feature = "gpu")]
         {
             SolverMode::Gpu {
@@ -211,6 +211,19 @@ fn main() -> Result<()> {
         }
         _ => None,
     };
+
+    // If GPU init failed, fall back to CPU mode.
+    #[cfg(feature = "gpu")]
+    if gpu_solver.is_none() {
+        if let SolverMode::Gpu { .. } = solver_mode {
+            let tc = if args.threads == 0 {
+                num_cpus::get().max(1)
+            } else {
+                args.threads
+            };
+            solver_mode = SolverMode::Cpu { threads: tc };
+        }
+    }
 
     loop {
         let cfg = fetch_config(&rpc, &config_pda)
